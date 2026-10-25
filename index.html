@@ -2879,7 +2879,7 @@ window.__appReady.then(function(){
     var data = {};
     for (var i=0;i<localStorage.length;i++){
       var k = localStorage.key(i);
-      if (k && k.indexOf("vo_")===0 && k!==K_AUTOBACKUP && k!==K_BKP_CONTA) data[k] = localStorage.getItem(k);
+      if (kEntraNoBackup(k)) data[k] = localStorage.getItem(k);
     }
     return data;
   }
@@ -4813,20 +4813,61 @@ window.__appReady.then(function(){
 
 
   // ---------- backup / restauração ----------
+  // Tudo que o sistema guarda com prefixo "vo_" entra no backup (vendas, clientes, estoque, notas, orçamentos, O.S., reservas, saídas,
+  // fechamentos, permissões, históricos...). Só ficam de fora as cópias internas de backup.
+  function kEntraNoBackup(k){ return !!k && k.indexOf("vo_")===0 && k!==K_AUTOBACKUP && k!==K_BKP_CONTA; }
+  // lê da nuvem o que NÃO fica no navegador (arquivo morto "arq:" e fotos "fotomes:"), em páginas
+  function lerExtrasDaNuvem(prefixo, tam, progresso){
+    var out = {};
+    function pagina(de){
+      return sb.from("kv_store").select("key,value").like("key", prefixo+"%").order("key",{ascending:true}).range(de, de+tam-1).then(function(res){
+        if (!res || res.error) throw new Error((res && res.error && res.error.message) || "Falha ao ler a nuvem.");
+        var lin = res.data || [];
+        lin.forEach(function(r){ out[r.key] = JSON.stringify(r.value); });
+        if (progresso) progresso(Object.keys(out).length);
+        if (lin.length===tam) return pagina(de+tam);
+        return out;
+      });
+    }
+    return pagina(0);
+  }
+  var backupArquivoEmAndamento = false;
   function exportBackup(auto){
-    var data = {};
+    if (backupArquivoEmAndamento) return;
+    var data = {}, qLocal = 0;
     for (var i=0;i<localStorage.length;i++){
       var k = localStorage.key(i);
-      if (k && (k.indexOf(K_ROWS)===0 || k.indexOf(K_SUMMARY)===0 || k===K_CUSTOMERS || k===K_NOTAS || k===K_ORCAMENTOS || k.indexOf(K_NOVOS)===0 || k===K_NOVOS_META || k===K_TAXAS || k.indexOf(K_SAIDAS)===0 || kExtraBackup(k))) data[k] = localStorage.getItem(k);
+      if (kEntraNoBackup(k)){ data[k] = localStorage.getItem(k); qLocal++; }
     }
     var now = new Date();
     var stamp = today+"-"+pad(now.getHours())+"h"+pad(now.getMinutes());
-    var blob = new Blob([JSON.stringify(data,null,2)], {type:"application/json"});
-    var url = URL.createObjectURL(blob);
-    var a = document.createElement("a");
-    a.href = url; a.download = "backup-vendas-"+stamp+(auto?"-auto":"")+".json";
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    function baixar(qNuvem, avisar){
+      var blob = new Blob([JSON.stringify(data,null,2)], {type:"application/json"});
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      a.href = url; a.download = "backup-vendas-"+stamp+(auto?"-auto":"")+".json";
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      if (avisar) alert("Backup baixado: "+qLocal+" registro(s) do sistema (vendas, clientes, estoque, notas, orçamentos, O.S. etc.)"+(qNuvem ? " + "+qNuvem+" da nuvem (arquivo morto e fotos)." : "."));
+    }
+    // sem nuvem/conta: baixa só o que está neste navegador
+    if (!sb || !state.userId || auto){ baixar(0, !auto); return; }
+    backupArquivoEmAndamento = true;
+    var btn = document.querySelector('[data-act="exportbackup"]'), txtOrig = btn ? btn.textContent : "";
+    function ocupado(t){ if (btn){ btn.disabled = true; btn.textContent = t; } }
+    function livre(){ backupArquivoEmAndamento = false; if (btn){ btn.disabled = false; btn.textContent = txtOrig; } }
+    ocupado("Preparando…");
+    var extras = {};
+    lerExtrasDaNuvem("arq:", 200, function(n){ ocupado("Arquivo morto… "+n); })
+      .then(function(a){ Object.keys(a).forEach(function(k){ extras[k] = a[k]; }); return lerExtrasDaNuvem(K_FOTOMES, 20, function(n){ ocupado("Fotos… "+n); }); })
+      .then(function(f){ Object.keys(f).forEach(function(k){ extras[k] = f[k]; }); return {ok:true}; })
+      .catch(function(e){ return {ok:false, msg:(e && e.message) ? e.message : String(e)}; })
+      .then(function(r){
+        livre();
+        if (!r.ok && !confirm("Não consegui baixar da nuvem o arquivo morto e as fotos ("+r.msg+").\n\nBaixar mesmo assim, só com os dados deste navegador?")) return;
+        Object.keys(extras).forEach(function(k){ data[k] = extras[k]; });
+        baixar(Object.keys(extras).length, true);
+      });
   }
   function autoBackupToStorage(){
     // backup silencioso: salva uma cópia dos dados dentro do próprio navegador,
@@ -4847,17 +4888,39 @@ window.__appReady.then(function(){
       try{ data = JSON.parse(reader.result); }catch(e){ alert("Não foi possível ler esse arquivo de backup."); return; }
       function go(){
         try{
-          var n = 0;
+          var n = 0, falhas = 0, nuvem = [];
           Object.keys(data).forEach(function(k){
-            if (k.indexOf(K_ROWS)===0 || k.indexOf(K_SUMMARY)===0 || k===K_CUSTOMERS || k===K_NOTAS || k===K_ORCAMENTOS || k.indexOf(K_NOVOS)===0 || k===K_NOVOS_META || k===K_TAXAS || k.indexOf(K_SAIDAS)===0 || kExtraBackup(k)){
-              localStorage.setItem(k, data[k]); n++;
+            if (kEntraNoBackup(k)){
+              try{ localStorage.setItem(k, data[k]); n++; }catch(eq){ falhas++; return; }
               try{ cloudPush(k, JSON.parse(data[k])); }catch(e2){}
+            } else if (k.indexOf(K_ARQ)===0 || k.indexOf(K_FOTOMES)===0){
+              nuvem.push(k); // arquivo morto e fotos: vão direto para a nuvem, não para o navegador
             }
           });
           state.monthSummaryCache = {};
           state.monthPartsCache = {};
-          alert(n+" registro(s) importado(s) com sucesso.");
-          render();
+          var enviados = 0;
+          function enviar(i){
+            if (!sb || i>=nuvem.length) return Promise.resolve();
+            var agora = new Date().toISOString();
+            var linhas = nuvem.slice(i, i+10).map(function(k){
+              var v = null; try{ v = JSON.parse(data[k]); }catch(e3){}
+              return v===null ? null : {key:k, value:v, updated_at:agora};
+            }).filter(Boolean);
+            if (!linhas.length) return enviar(i+10);
+            return sb.from("kv_store").upsert(linhas).then(function(res){
+              if (res && res.error) throw new Error(res.error.message || "A nuvem recusou.");
+              enviados += linhas.length;
+              return enviar(i+10);
+            });
+          }
+          enviar(0).then(function(){
+            alert(n+" registro(s) importado(s) com sucesso."+(enviados ? "\n"+enviados+" da nuvem (arquivo morto/fotos) também foram restaurados." : "")+(falhas ? "\nAtenção: "+falhas+" registro(s) não coube(ram) no armazenamento do navegador." : ""));
+            render();
+          }).catch(function(e4){
+            alert(n+" registro(s) importado(s), mas não consegui enviar o arquivo morto/fotos para a nuvem: "+((e4 && e4.message) || e4));
+            render();
+          });
         }catch(e){
           alert("Não foi possível ler esse arquivo de backup.");
         }
@@ -6922,7 +6985,7 @@ window.__appReady.then(function(){
     var estoquista = state.role==="estoquista";
     var isMaster = state.role==="master";
     var backupBtns =
-      '<button class="btn ghost small" data-act="exportbackup" title="Baixa um arquivo com todos os dados salvos neste navegador">Backup</button>'+
+      '<button class="btn ghost small" data-act="exportbackup" title="Baixa um arquivo com TUDO: vendas, clientes, estoque, notas, orçamentos, O.S., reservas, saídas e, na nuvem, arquivo morto e fotos">Backup</button>'+
       '<label class="btn ghost small" for="importInput" style="margin:0;">Importar'+
         '<input type="file" id="importInput" accept="application/json" style="display:none;">'+
       '</label>'+
