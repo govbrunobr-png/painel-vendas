@@ -1025,8 +1025,18 @@ window.__appReady.then(function(){
   // como está, o sistema continua funcionando 100% normalmente, só que
   // sem sincronizar — cada aparelho fica com seus próprios dados.
   var CFG_APP = window.APP_CONFIG || {};
-  var SUPABASE_URL = CFG_APP.SUPABASE_URL || "COLE_AQUI";
-  var SUPABASE_ANON_KEY = CFG_APP.SUPABASE_KEY || "COLE_AQUI";
+  // aceita o endereço do jeito que vier: tira espaços, barra no final, "/rest/v1" etc. e até o link do painel (supabase.com/dashboard/project/CODIGO)
+  function limparUrlSupabase(u){
+    u = String(u||"").replace(/[\s"']/g, "");
+    var d = /supabase\.com\/dashboard\/project\/([a-z0-9]+)/i.exec(u);
+    if (d) return "https://"+d[1]+".supabase.co";
+    var m = /^(https?:\/\/[^\/?#]+)/i.exec(u);
+    if (m) return m[1];
+    if (/^[a-z0-9]{15,25}$/i.test(u)) return "https://"+u+".supabase.co"; // só o código do projeto
+    return u || "COLE_AQUI";
+  }
+  var SUPABASE_URL = limparUrlSupabase(CFG_APP.SUPABASE_URL);
+  var SUPABASE_ANON_KEY = String(CFG_APP.SUPABASE_KEY || "COLE_AQUI").replace(/[\s"']/g, "");
 
   var cloudStatus = "off"; // off | connecting | on | error
   var sb = null;
