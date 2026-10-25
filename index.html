@@ -171,6 +171,10 @@ window.__sbLib = new Promise(function(resolve){
   .sync-badge.on{color:var(--green);border-color:var(--green);}
   .sync-badge.connecting{color:var(--yellow);border-color:var(--yellow);}
   .sync-badge.error{color:var(--red);border-color:var(--red);}
+  .sync-badge.prog{display:inline-flex;align-items:center;gap:8px;}
+  .sync-bar{display:inline-block;width:110px;height:7px;border-radius:4px;background:var(--border-soft);overflow:hidden;vertical-align:middle;}
+  .sync-bar i{display:block;height:100%;width:0;background:var(--yellow);border-radius:4px;transition:width .25s ease;}
+  .sync-badge.error .sync-bar i{background:var(--red);}
   .auth-zone{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end;}
   .pill{
     font-size:12.5px;padding:6px 12px;border:1px solid var(--border);border-radius:3px;
@@ -1104,9 +1108,20 @@ window.__appReady.then(function(){
 
   function syncBadgeHtml(){
     if (!sb) return '<span id="syncBadge" class="sync-badge off" title="Configure o Supabase no início do arquivo para sincronizar entre aparelhos">○ somente local</span>';
-    if (cloudStatus==="on" && filaTamanho()) return '<span id="syncBadge" class="sync-badge connecting" title="Enviando para a nuvem. Já está salvo neste aparelho.">↻ enviando '+filaTamanho()+'…</span>';
+    if (cloudStatus==="on" && filaTamanho()){
+      var pg = progressoFila();
+      return '<span id="syncBadge" class="sync-badge connecting prog" title="Enviando para a nuvem: '+pg.feitos+' de '+pg.total+' enviados. Já está tudo salvo neste aparelho.">'+
+             '<span class="sync-bar"><i style="width:'+pg.pct+'%"></i></span>'+pg.pct+'% · '+pg.feitos+'/'+pg.total+'</span>';
+    }
     if (cloudStatus==="on") return '<span id="syncBadge" class="sync-badge on" title="Tudo sincronizado com a nuvem">● nuvem conectada</span>';
-    if (cloudStatus==="error") return '<span id="syncBadge" class="sync-badge error" title="Falha ao conectar com a nuvem — os dados continuam salvos neste aparelho e serão reenviados sozinhos">⚠ erro de conexão'+(filaTamanho()?' · '+filaTamanho()+' pendente(s)':'')+'</span>';
+    if (cloudStatus==="error"){
+      if (filaTamanho()){
+        var pe = progressoFila();
+        return '<span id="syncBadge" class="sync-badge error prog" title="Falha ao enviar para a nuvem — os dados continuam salvos neste aparelho e serão reenviados sozinhos">'+
+               '<span class="sync-bar"><i style="width:'+pe.pct+'%"></i></span>⚠ erro · '+pe.falta+' pendente(s)</span>';
+      }
+      return '<span id="syncBadge" class="sync-badge error" title="Falha ao conectar com a nuvem — os dados continuam salvos neste aparelho e serão reenviados sozinhos">⚠ erro de conexão</span>';
+    }
     return '<span id="syncBadge" class="sync-badge connecting" title="Conectando à nuvem...">○ conectando…</span>';
   }
 
@@ -1131,6 +1146,15 @@ window.__appReady.then(function(){
 
   function salvarFila(){ try{ localStorage.setItem(K_FILA, JSON.stringify(fila)); }catch(e){} }
   function filaTamanho(){ return Object.keys(fila).length; }
+  // progresso do envio: o "total" é o maior tamanho da fila desde a última vez que ela esvaziou
+  var filaTotalLote = 0;
+  function progressoFila(){
+    var falta = filaTamanho();
+    if (!falta){ filaTotalLote = 0; return {falta:0, total:0, feitos:0, pct:100}; }
+    if (falta > filaTotalLote) filaTotalLote = falta;
+    var feitos = filaTotalLote - falta;
+    return {falta:falta, total:filaTotalLote, feitos:feitos, pct:Math.max(0, Math.min(99, Math.floor(feitos*100/filaTotalLote)))};
+  }
 
   // JSON com chaves em ordem fixa (o jsonb da nuvem reordena as chaves; sem isso o "mesmo" valor pareceria diferente)
   function canon(v){
@@ -1345,7 +1369,7 @@ window.__appReady.then(function(){
     function worker(){
       if (idx>=chaves.length) return Promise.resolve();
       var k = chaves[idx++];
-      return enviarChave(k).then(function(ok){ if (!ok) falhou = true; }).then(worker);
+      return enviarChave(k).then(function(ok){ if (!ok) falhou = true; refreshSyncBadge(); }).then(worker);
     }
     return Promise.all([worker(), worker(), worker(), worker()]).then(function(){
       if (falhou){
